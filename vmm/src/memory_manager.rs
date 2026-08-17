@@ -2088,8 +2088,11 @@ impl MemoryManager {
     }
 
     /// Create the single guest RAM region for identity-mapped memory: map
-    /// the host physical carve-out at `identity_base` through /dev/mem and
-    /// place it at the same guest physical address (GPA == HPA).
+    /// the host physical carve-out through the `npu_guestmem` char device
+    /// (cacheable remap_pfn_range of the reserved range; /dev/mem on arm64
+    /// maps Device memory, which is unusable as guest RAM: BUS_ADRALN on
+    /// wide accesses) and place it at guest physical address `identity_base`
+    /// (GPA == HPA, with `npu_guestmem` base == identity_base).
     #[cfg(target_os = "linux")]
     fn create_identity_ram_region(
         identity_base: u64,
@@ -2098,12 +2101,11 @@ impl MemoryManager {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
-            .open("/dev/mem")
+            .open("/dev/npu_guestmem")
             .map_err(Error::IdentityMapOpenDevMem)?;
 
-        // SAFETY: FFI call with a valid fd; `identity_base` is expected to
-        // point at the reserved-memory carve-out described by the host
-        // device tree (outside System RAM, so /dev/mem allows the mapping).
+        // SAFETY: FFI call with a valid fd; the npu_guestmem module exposes
+        // the reserved carve-out starting at file offset 0.
         let addr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -2111,7 +2113,7 @@ impl MemoryManager {
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_SHARED,
                 file.as_raw_fd(),
-                identity_base as libc::off_t,
+                0,
             )
         };
         if addr == libc::MAP_FAILED {

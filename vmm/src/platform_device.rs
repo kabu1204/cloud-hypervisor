@@ -497,13 +497,34 @@ impl VfioPlatformDevice {
                 VFIO_IRQ_SET_ACTION_UNMASK,
                 resample.as_raw_fd(),
             )?;
-            // The guest vGIC SPI n is INTID n + 32, which is what KVM's
-            // irqfd `gsi` encodes on aarch64.
+            // The `irq` parameter is the *guest-visible virtual SPI*, not
+            // the physical one — VFIO decouples them (physical IRQ -> vfio
+            // trigger eventfd -> KVM irqfd -> vGIC SPI).
+            //
+            // Constraint: cloud-hypervisor only installs GSI routing for the
+            // legacy SPI range (devices/src/gic.rs: gsi 32..63 -> SPI pins
+            // 0..31, set up in Gic::enable() before platform devices are
+            // created). KVM irqfd injection goes through that routing table,
+            // so the virtual SPI MUST be in 0..31 or kvm_irq_map_gsi() finds
+            // no entry and the interrupt is silently dropped (verified: jobs
+            // completed on hardware, IRQ fired on the host, but the guest
+            // never saw it).
+            if spi >= 32 {
+                return Err(PlatformDeviceError::SetIrqs(io::Error::other(
+                    format!("platform device IRQ must be a legacy-range SPI (0..31), got {spi}"),
+                )));
+            }
             let gsi = spi + 32;
+            eprintln!(
+                "NPUDEBUG: register_irqfd_with_resample trigger_fd={} resample_fd={} gsi={}",
+                trigger.as_raw_fd(),
+                resample.as_raw_fd(),
+                gsi
+            );
             vm.register_irqfd_with_resample(&trigger, &resample, gsi)
                 .map_err(PlatformDeviceError::RegisterIrqfd)?;
             info!(
-                "platform device {}: IRQ SPI {spi} wired to vGIC INTID {gsi} (irqfd+resamplefd)",
+                "platform device {}: virtual SPI {spi} (guest INTID {gsi}) wired via irqfd+resamplefd",
                 config.group.display()
             );
             Some(PlatformIrq {
