@@ -290,6 +290,10 @@ fn default_memoryconfig_thp() -> bool {
     true
 }
 
+fn default_memoryconfig_identity_base() -> u64 {
+    0x1_c000_0000
+}
+
 fn default_cpusconfig_nested() -> bool {
     true
 }
@@ -320,6 +324,13 @@ pub struct MemoryConfig {
     pub zones: Option<Vec<MemoryZoneConfig>>,
     #[serde(default = "default_memoryconfig_thp")]
     pub thp: bool,
+    /// Identity-map guest RAM: the guest physical address space is placed
+    /// on top of a host physical memory carve-out (GPA == HPA).
+    #[serde(default)]
+    pub identity_map: bool,
+    /// Host physical base address of the identity-mapped carve-out.
+    #[serde(default = "default_memoryconfig_identity_base")]
+    pub identity_base: u64,
 }
 
 pub const DEFAULT_MEMORY_MB: u64 = 512;
@@ -339,6 +350,8 @@ impl Default for MemoryConfig {
             reserve: false,
             zones: None,
             thp: true,
+            identity_map: false,
+            identity_base: default_memoryconfig_identity_base(),
         }
     }
 }

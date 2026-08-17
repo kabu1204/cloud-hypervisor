@@ -147,9 +147,12 @@ pub fn create_fdt<T: DeviceInfoForFdt + Clone + Debug, S: BuildHasher>(
 }
 
 pub fn write_fdt_to_memory(fdt_final: &[u8], guest_mem: &GuestMemoryMmap) -> Result<()> {
-    // Write FDT to memory.
+    // Write FDT to memory, at the beginning of the first RAM region (which
+    // is not `layout::RAM_START` when the guest RAM is identity-mapped).
+    let fdt_addr = super::first_ram_start(guest_mem)
+        .unchecked_add(super::layout::FDT_START.0 - super::layout::RAM_START.0);
     guest_mem
-        .write_slice(fdt_final, super::layout::FDT_START)
+        .write_slice(fdt_final, fdt_addr)
         .map_err(Error::WriteFdtToMemory)?;
     Ok(())
 }
@@ -441,25 +444,38 @@ fn create_memory_node(
                 .first()
                 .expect("There should be at last one memory region");
             let ram_start = super::layout::RAM_START.raw_value();
-            let mem_32bit_reserved_start = super::layout::MEM_32BIT_RESERVED_START.raw_value();
 
-            if !((first_region_start <= &ram_start)
-                && (first_region_end > &ram_start)
-                && (first_region_end <= &mem_32bit_reserved_start))
-            {
-                panic!(
-                    "Unexpected first memory region layout: (start: 0x{first_region_start:08x}, end: 0x{first_region_end:08x}).
-                    ram_start: 0x{ram_start:08x}, mem_32bit_reserved_start: 0x{mem_32bit_reserved_start:08x}"
-                );
+            if *first_region_start > ram_start {
+                // The guest RAM does not start at the standard RAM_START:
+                // it is identity-mapped onto a host physical memory
+                // carve-out. Describe the region as-is.
+                let mem_reg_prop = [*first_region_start, first_region_end - first_region_start];
+                let memory_node_name = format!("memory@{first_region_start:x}");
+                let memory_node = fdt.begin_node(&memory_node_name)?;
+                fdt.property_string("device_type", "memory")?;
+                fdt.property_array_u64("reg", &mem_reg_prop)?;
+                fdt.end_node(memory_node)?;
+            } else {
+                let mem_32bit_reserved_start = super::layout::MEM_32BIT_RESERVED_START.raw_value();
+
+                if !((first_region_start <= &ram_start)
+                    && (first_region_end > &ram_start)
+                    && (first_region_end <= &mem_32bit_reserved_start))
+                {
+                    panic!(
+                        "Unexpected first memory region layout: (start: 0x{first_region_start:08x}, end: 0x{first_region_end:08x}).
+                        ram_start: 0x{ram_start:08x}, mem_32bit_reserved_start: 0x{mem_32bit_reserved_start:08x}"
+                    );
+                }
+
+                let mem_size = first_region_end - ram_start;
+                let mem_reg_prop = [ram_start, mem_size];
+                let memory_node_name = format!("memory@{ram_start:x}");
+                let memory_node = fdt.begin_node(&memory_node_name)?;
+                fdt.property_string("device_type", "memory")?;
+                fdt.property_array_u64("reg", &mem_reg_prop)?;
+                fdt.end_node(memory_node)?;
             }
-
-            let mem_size = first_region_end - ram_start;
-            let mem_reg_prop = [ram_start, mem_size];
-            let memory_node_name = format!("memory@{ram_start:x}");
-            let memory_node = fdt.begin_node(&memory_node_name)?;
-            fdt.property_string("device_type", "memory")?;
-            fdt.property_array_u64("reg", &mem_reg_prop)?;
-            fdt.end_node(memory_node)?;
         }
 
         // Create the memory map entry for memory region after the gap if any

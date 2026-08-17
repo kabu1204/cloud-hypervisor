@@ -362,7 +362,8 @@ fn get_cli_options_sorted(
                      hotplug_method=acpi|virtio-mem,\
                      hotplug_size=<hotpluggable_memory_size>,\
                      hotplugged_size=<hotplugged_memory_size>,\
-                     prefault=on|off,reserve=on|off,thp=on|off\"",
+                     prefault=on|off,reserve=on|off,thp=on|off,\
+                     identity_map=on|off,identity_base=<host_physical_base>\"",
             )
             .default_value(default_memory)
             .group("vm-config"),
@@ -1051,6 +1052,8 @@ mod unit_tests {
                 reserve: false,
                 zones: None,
                 thp: true,
+                identity_map: false,
+                identity_base: 0x1_c000_0000,
             },
             payload: Some(PayloadConfig {
                 kernel: Some(PathBuf::from("/path/to/kernel")),

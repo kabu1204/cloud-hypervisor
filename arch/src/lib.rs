@@ -103,9 +103,9 @@ pub mod aarch64;
 
 #[cfg(target_arch = "aarch64")]
 pub use aarch64::{
-    _NSIG, EntryPoint, arch_memory_regions, configure_system, configure_vcpu,
-    fdt::DeviceInfoForFdt, get_host_cpu_phys_bits, initramfs_load_addr, layout,
-    layout::CMDLINE_MAX_SIZE, layout::IRQ_BASE, uefi,
+    _NSIG, EntryPoint, acpi_load_addr, arch_memory_regions, configure_system, configure_vcpu,
+    fdt::DeviceInfoForFdt, first_ram_start, get_host_cpu_phys_bits, initramfs_load_addr,
+    kernel_load_addr, layout, layout::CMDLINE_MAX_SIZE, layout::IRQ_BASE, uefi,
 };
 
 /// Module for riscv64 related functionality.
@@ -115,8 +115,8 @@ pub mod riscv64;
 #[cfg(target_arch = "riscv64")]
 pub use riscv64::{
     _NSIG, EntryPoint, arch_memory_regions, configure_system, configure_vcpu,
-    fdt::DeviceInfoForFdt, get_host_cpu_phys_bits, initramfs_load_addr, layout,
-    layout::CMDLINE_MAX_SIZE, layout::IRQ_BASE, uefi,
+    fdt::DeviceInfoForFdt, first_ram_start, get_host_cpu_phys_bits, initramfs_load_addr,
+    kernel_load_addr, layout, layout::CMDLINE_MAX_SIZE, layout::IRQ_BASE, uefi,
 };
 
 #[cfg(target_arch = "x86_64")]

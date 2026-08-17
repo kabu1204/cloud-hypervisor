@@ -1540,9 +1540,10 @@ impl Vm {
     ) -> Result<EntryPoint> {
         let guest_memory = memory_manager.lock().as_ref().unwrap().guest_memory();
         let mem = guest_memory.memory();
-        let alignment = 0x20_0000;
-        // round up
-        let aligned_kernel_addr = layout::KERNEL_START.0.div_ceil(alignment) * alignment;
+        // Load the kernel at the start of the first RAM region plus the
+        // standard offset (which is not `layout::RAM_START`-based when the
+        // guest RAM is identity-mapped), rounded up to 2 MiB.
+        let aligned_kernel_addr = arch::kernel_load_addr(mem.deref()).0;
         let entry_addr = {
             match loader::pe::PE::load(
                 mem.deref(),

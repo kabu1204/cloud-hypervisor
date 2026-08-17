@@ -1143,7 +1143,13 @@ pub fn create_acpi_tables(
     trace_scoped!("create_acpi_tables");
 
     let start_time = Instant::now();
+    #[cfg(target_arch = "x86_64")]
     let rsdp_addr = layout::RSDP_POINTER;
+    // On aarch64 the ACPI tables sit above the FDT at the beginning of the
+    // first RAM region, which is not `layout::RAM_START` when the guest RAM
+    // is identity-mapped onto a host physical carve-out.
+    #[cfg(target_arch = "aarch64")]
+    let rsdp_addr = arch::aarch64::acpi_load_addr(guest_mem);
     let dsdt_addr = rsdp_addr.checked_add(Rsdp::len() as u64).unwrap();
 
     let (rsdp, tables_bytes, _xsdt_table_pointers) = create_acpi_tables_internal(

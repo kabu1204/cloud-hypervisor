@@ -1094,7 +1094,9 @@ impl MemoryConfig {
             .add("hugepage_size")
             .add("prefault")
             .add("reserve")
-            .add("thp");
+            .add("thp")
+            .add("identity_map")
+            .add("identity_base");
         parser.parse(memory).map_err(Error::ParseMemory)?;
 
         let size = parser
@@ -1148,6 +1150,29 @@ impl MemoryConfig {
             .map_err(Error::ParseMemory)?
             .unwrap_or(Toggle(true))
             .0;
+        let identity_map = parser
+            .convert::<Toggle>("identity_map")
+            .map_err(Error::ParseMemory)?
+            .unwrap_or(Toggle(false))
+            .0;
+        let identity_base = match parser.get("identity_base") {
+            Some(s) => {
+                let s = s.trim();
+                let parsed =
+                    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                        u64::from_str_radix(hex, 16)
+                    } else {
+                        s.parse::<u64>()
+                    };
+                parsed.map_err(|_| {
+                    Error::ParseMemory(OptionParserError::Conversion(
+                        "identity_base".to_owned(),
+                        s.to_owned(),
+                    ))
+                })?
+            }
+            None => 0x1_c000_0000,
+        };
 
         let zones: Option<Vec<MemoryZoneConfig>> = if let Some(memory_zones) = &memory_zones {
             let mut zones = Vec::new();
@@ -1250,6 +1275,8 @@ impl MemoryConfig {
             reserve,
             zones,
             thp,
+            identity_map,
+            identity_base,
         })
     }
 
@@ -4141,6 +4168,32 @@ mod unit_tests {
                 ..Default::default()
             }
         );
+        // identity_map with default identity_base
+        assert_eq!(
+            MemoryConfig::parse("size=512M,identity_map=on", None)?,
+            MemoryConfig {
+                identity_map: true,
+                ..Default::default()
+            }
+        );
+        // identity_base parsed as hex or decimal
+        assert_eq!(
+            MemoryConfig::parse("size=512M,identity_map=on,identity_base=0x1c0000000", None)?,
+            MemoryConfig {
+                identity_map: true,
+                identity_base: 0x1_c000_0000,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            MemoryConfig::parse("size=512M,identity_map=on,identity_base=7516192768", None)?,
+            MemoryConfig {
+                identity_map: true,
+                identity_base: 0x1_c000_0000,
+                ..Default::default()
+            }
+        );
+        assert!(MemoryConfig::parse("identity_map=on,identity_base=xyz", None).is_err());
         Ok(())
     }
 
@@ -5391,6 +5444,8 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
                 reserve: false,
                 zones: None,
                 thp: true,
+                identity_map: false,
+                identity_base: 0x1_c000_0000,
             },
             payload: Some(PayloadConfig {
                 kernel: Some(PathBuf::from("/path/to/kernel")),

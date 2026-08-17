@@ -92,6 +92,10 @@ const MPOL_MF_MOVE: u32 = 1 << 1;
 // Reserve 1 MiB for platform MMIO devices (e.g. ACPI control devices)
 const PLATFORM_DEVICE_AREA_SIZE: u64 = 1 << 20;
 
+/// Size of the host physical memory carve-out used for identity-mapped
+/// guest RAM (reserved via the host device tree).
+const IDENTITY_MAP_MAX_SIZE: u64 = 1 << 30;
+
 const MAX_PREFAULT_THREAD_COUNT: usize = 16;
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -419,6 +423,32 @@ pub enum Error {
     /// Failed to prefault memory
     #[error("Failed to prefault memory")]
     PrefaultMemory(#[source] io::Error),
+
+    /// Identity-mapped memory cannot be combined with shared memory or hugepages
+    #[error("'identity_map' cannot be combined with 'shared' or 'hugepages'")]
+    IdentityMapWithSharedOrHugepages,
+
+    /// Identity-mapped memory cannot be combined with memory hotplug
+    #[error(
+        "'identity_map' cannot be combined with memory hotplug ('hotplug_size'/'hotplugged_size')"
+    )]
+    IdentityMapWithHotplug,
+
+    /// Identity-mapped memory cannot be combined with user-provided memory zones
+    #[error("'identity_map' cannot be combined with user-provided memory zones")]
+    IdentityMapWithZones,
+
+    /// Identity-mapped memory size exceeds the reserved carve-out size (1 GiB)
+    #[error("'identity_map' memory size exceeds the 1 GiB identity-mapped carve-out")]
+    IdentityMapTooLarge,
+
+    /// Failed to open /dev/mem for identity-mapped memory
+    #[error("Failed to open /dev/mem for identity-mapped memory")]
+    IdentityMapOpenDevMem(#[source] io::Error),
+
+    /// Failed to mmap the identity-mapped physical memory carve-out
+    #[error("Failed to mmap the identity-mapped physical memory carve-out")]
+    IdentityMapMmap(#[source] io::Error),
 }
 
 impl From<UffdError> for Error {
@@ -1398,6 +1428,31 @@ impl MemoryManager {
     ) -> Result<(u64, Vec<MemoryZoneConfig>, bool), Error> {
         let mut allow_mem_hotplug = false;
 
+        if config.identity_map {
+            if config.shared || config.hugepages {
+                error!("'identity_map' cannot be combined with 'shared' or 'hugepages'");
+                return Err(Error::IdentityMapWithSharedOrHugepages);
+            }
+            if config.hotplug_size.is_some() || config.hotplugged_size.is_some() {
+                error!(
+                    "'identity_map' cannot be combined with memory hotplug \
+                    ('hotplug_size'/'hotplugged_size')"
+                );
+                return Err(Error::IdentityMapWithHotplug);
+            }
+            if config.zones.is_some() {
+                error!("'identity_map' cannot be combined with user-provided memory zones");
+                return Err(Error::IdentityMapWithZones);
+            }
+            if config.size > IDENTITY_MAP_MAX_SIZE {
+                error!(
+                    "'identity_map' memory size {:#x} exceeds the {:#x} identity-mapped carve-out",
+                    config.size, IDENTITY_MAP_MAX_SIZE
+                );
+                return Err(Error::IdentityMapTooLarge);
+            }
+        }
+
         if user_provided_zones {
             if config.zones.is_none() {
                 error!(
@@ -1701,8 +1756,21 @@ impl MemoryManager {
                 })
                 .collect();
 
-            let (mem_regions, mut memory_zones) =
-                Self::create_memory_regions_from_zones(&ram_regions, &zones, prefault, config.thp)?;
+            let (mem_regions, mut memory_zones) = if config.identity_map {
+                // Identity-mapped guest RAM: skip the zone-based memfd
+                // allocation and map the host physical carve-out through
+                // /dev/mem at GPA == HPA.
+                let region = Self::create_identity_ram_region(config.identity_base, ram_size)?;
+                let mut memory_zones = HashMap::new();
+                // SAFETY: FFI call. Trivially safe.
+                let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as u64 };
+                let mut memory_zone = MemoryZone::new(false, false, page_size, false);
+                memory_zone.regions.push(Arc::clone(&region));
+                memory_zones.insert(String::from(DEFAULT_MEMORY_ZONE), memory_zone);
+                (vec![region], memory_zones)
+            } else {
+                Self::create_memory_regions_from_zones(&ram_regions, &zones, prefault, config.thp)?
+            };
 
             let mut guest_memory = GuestMemoryMmap::from_arc_regions(mem_regions)
                 .map_err(Error::GuestRegionCollection)?;
@@ -2017,6 +2085,74 @@ impl MemoryManager {
 
             Ok(FileOffset::new(f, file_offset))
         }
+    }
+
+    /// Create the single guest RAM region for identity-mapped memory: map
+    /// the host physical carve-out at `identity_base` through /dev/mem and
+    /// place it at the same guest physical address (GPA == HPA).
+    #[cfg(target_os = "linux")]
+    fn create_identity_ram_region(
+        identity_base: u64,
+        size: u64,
+    ) -> Result<Arc<GuestRegionMmap>, Error> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/mem")
+            .map_err(Error::IdentityMapOpenDevMem)?;
+
+        // SAFETY: FFI call with a valid fd; `identity_base` is expected to
+        // point at the reserved-memory carve-out described by the host
+        // device tree (outside System RAM, so /dev/mem allows the mapping).
+        let addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size as usize,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                identity_base as libc::off_t,
+            )
+        };
+        if addr == libc::MAP_FAILED {
+            return Err(Error::IdentityMapMmap(io::Error::last_os_error()));
+        }
+
+        // SAFETY: `addr` points at the mapping of `size` bytes created just
+        // above, with matching protection and flags.
+        let mmap_region = unsafe {
+            MmapRegion::build_raw(
+                addr.cast(),
+                size as usize,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+            )
+        }
+        .map_err(Error::GuestMemoryRegion)?;
+
+        let region = GuestRegionMmap::new(mmap_region, GuestAddress(identity_base)).ok_or(
+            Error::GuestMemory(MmapError::InvalidGuestAddress(GuestAddress(identity_base))),
+        )?;
+
+        info!(
+            "guest RAM identity-mapped: GPA {identity_base:#x} = HPA {identity_base:#x} (size {size:#x})"
+        );
+        debug!(
+            "identity-mapped RAM region: host VA {:#x} -> HPA/GPA {identity_base:#x}, size {size:#x}",
+            addr as u64
+        );
+
+        Ok(Arc::new(region))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn create_identity_ram_region(
+        _identity_base: u64,
+        _size: u64,
+    ) -> Result<Arc<GuestRegionMmap>, Error> {
+        Err(Error::IdentityMapOpenDevMem(io::Error::other(
+            "'identity_map' is only supported on Linux",
+        )))
     }
 
     #[expect(clippy::too_many_arguments)]

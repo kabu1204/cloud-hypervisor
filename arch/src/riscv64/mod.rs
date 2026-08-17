@@ -19,7 +19,9 @@ use std::sync::{Arc, Mutex};
 use hypervisor::arch::riscv64::aia::Vaia;
 use log::{Level, log_enabled};
 use thiserror::Error;
-use vm_memory::{Address, GuestAddress, GuestMemory, GuestMemoryAtomic};
+use vm_memory::{
+    Address, GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic, GuestMemoryRegion,
+};
 
 pub use self::fdt::DeviceInfoForFdt;
 use crate::{DeviceType, GuestMemoryMmap, PciSpaceInfo, RegionType};
@@ -85,16 +87,37 @@ pub fn configure_vcpu(
     id: u32,
     boot_setup: Option<(EntryPoint, &GuestMemoryAtomic<GuestMemoryMmap>)>,
 ) -> super::Result<()> {
-    if let Some((kernel_entry_point, _guest_memory)) = boot_setup {
+    if let Some((kernel_entry_point, guest_memory)) = boot_setup {
+        let fdt_addr = first_ram_start(&guest_memory.memory())
+            .unchecked_add(layout::FDT_START.0 - layout::RAM_START.0);
         vcpu.setup_regs(
             id,
             kernel_entry_point.entry_addr.raw_value(),
-            layout::FDT_START.raw_value(),
+            fdt_addr.raw_value(),
         )
         .map_err(Error::RegsConfiguration)?;
     }
 
     Ok(())
+}
+
+/// Returns the start address of the first guest RAM region.
+pub fn first_ram_start(guest_mem: &GuestMemoryMmap) -> GuestAddress {
+    guest_mem
+        .iter()
+        .next()
+        .map(GuestMemoryRegion::start_addr)
+        .expect("GuestMemory must have at least one memory region")
+}
+
+/// Returns the guest address where the kernel image should be loaded: the
+/// start of the first RAM region plus the standard offset
+/// (`KERNEL_START - RAM_START`), aligned up to 2 MiB.
+pub fn kernel_load_addr(guest_mem: &GuestMemoryMmap) -> GuestAddress {
+    const ALIGNMENT: u64 = 0x20_0000;
+    let kernel_offset = layout::KERNEL_START.0 - layout::RAM_START.0;
+    let addr = first_ram_start(guest_mem).raw_value() + kernel_offset;
+    GuestAddress(addr.div_ceil(ALIGNMENT) * ALIGNMENT)
 }
 
 pub fn arch_memory_regions() -> Vec<(GuestAddress, usize, RegionType)> {
