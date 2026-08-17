@@ -92,6 +92,7 @@ pub mod landlock;
 pub mod memory_manager;
 pub mod migration;
 mod pci_segment;
+pub mod platform_device;
 pub mod seccomp_filters;
 mod serial_manager;
 #[cfg(all(feature = "kvm", feature = "sev_snp", feature = "fw_cfg"))]
@@ -3369,6 +3370,7 @@ mod unit_tests {
             #[cfg(target_arch = "x86_64")]
             debug_console: DebugConsoleConfig::default(),
             devices: None,
+            platform_devices: None,
             user_devices: None,
             vdpa: None,
             vsock: None,

@@ -876,6 +876,21 @@ impl vm::Vm for KvmVm {
     }
 
     ///
+    /// Registers an event with a resample eventfd that will, when signaled,
+    /// trigger the `gsi` IRQ (for level-triggered interrupts).
+    ///
+    fn register_irqfd_with_resample(
+        &self,
+        fd: &EventFd,
+        resample_fd: &EventFd,
+        gsi: u32,
+    ) -> vm::Result<()> {
+        self.fd
+            .register_irqfd_with_resample(fd, resample_fd, gsi)
+            .map_err(|e| vm::HypervisorVmError::RegisterIrqFd(e.into()))
+    }
+
+    ///
     /// Unregisters an event that will, when signaled, trigger the `gsi` IRQ.
     ///
     fn unregister_irqfd(&self, fd: &EventFd, gsi: u32) -> vm::Result<()> {

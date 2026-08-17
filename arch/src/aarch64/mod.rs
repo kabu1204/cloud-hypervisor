@@ -173,6 +173,7 @@ pub fn configure_system<T: DeviceInfoForFdt + Clone + Debug, S: BuildHasher>(
     gic_device: &Arc<Mutex<dyn Vgic>>,
     numa_nodes: &NumaNodes,
     pmu_supported: bool,
+    npu_core: Option<&fdt::NpuCoreFdtInfo>,
 ) -> super::Result<()> {
     let fdt_final = fdt::create_fdt(
         guest_mem,
@@ -186,6 +187,7 @@ pub fn configure_system<T: DeviceInfoForFdt + Clone + Debug, S: BuildHasher>(
         numa_nodes,
         virtio_iommu_bdf,
         pmu_supported,
+        npu_core,
     )
     .map_err(|_| Error::SetupFdt)?;
 

@@ -148,6 +148,15 @@ pub enum Error {
     /// Failed parsing device parameters
     #[error("Error parsing --device")]
     ParseDevice(#[source] OptionParserError),
+    /// Failed parsing platform device parameters
+    #[error("Error parsing --platform-device")]
+    ParsePlatformDevice(#[source] OptionParserError),
+    /// No group given for platform device
+    #[error("Error parsing --platform-device: 'group' is required")]
+    ParsePlatformDeviceGroupMissing,
+    /// Invalid map value for platform device
+    #[error("Error parsing --platform-device: invalid 'map' address list")]
+    ParsePlatformDeviceInvalidMap,
     /// Failed parsing vsock parameters
     #[error("Error parsing --vsock")]
     ParseVsock(#[source] OptionParserError),
@@ -493,6 +502,7 @@ pub struct VmParams<'a> {
     #[cfg(target_arch = "x86_64")]
     pub debug_console: &'a str,
     pub devices: Option<Vec<&'a str>>,
+    pub platform_devices: Option<Vec<&'a str>>,
     pub user_devices: Option<Vec<&'a str>>,
     pub vdpa: Option<Vec<&'a str>>,
     pub vsock: Option<&'a str>,
@@ -558,6 +568,9 @@ impl<'a> VmParams<'a> {
         let devices: Option<Vec<&str>> = args
             .get_many::<String>("device")
             .map(|x| x.map(|y| y as &str).collect());
+        let platform_devices: Option<Vec<&str>> = args
+            .get_many::<String>("platform-device")
+            .map(|x| x.map(|y| y as &str).collect());
         let user_devices: Option<Vec<&str>> = args
             .get_many::<String>("user-device")
             .map(|x| x.map(|y| y as &str).collect());
@@ -614,6 +627,7 @@ impl<'a> VmParams<'a> {
             #[cfg(target_arch = "x86_64")]
             debug_console,
             devices,
+            platform_devices,
             user_devices,
             vdpa,
             vsock,
@@ -2552,6 +2566,60 @@ impl DeviceConfig {
     }
 }
 
+impl PlatformDeviceConfig {
+    pub const SYNTAX: &'static str = "VFIO platform device passthrough \
+    \"group=<vfio_group_path>,map=<gpa0:gpa1:...>,irq=<SPI number>,\
+    device=<platform_device_name>,id=<device_id>\"";
+
+    pub fn parse(platform_device: &str) -> Result<Self> {
+        let mut parser = OptionParser::new();
+        parser
+            .add("id")
+            .add("group")
+            .add("device")
+            .add("map")
+            .add("irq");
+        parser
+            .parse(platform_device)
+            .map_err(Error::ParsePlatformDevice)?;
+
+        let id = parser.get("id");
+        let group = parser
+            .get("group")
+            .map(PathBuf::from)
+            .ok_or(Error::ParsePlatformDeviceGroupMissing)?;
+        let device_name = parser.get("device");
+        let map = parser
+            .get("map")
+            .map(|s| {
+                s.split(':')
+                    .map(|v| {
+                        let v = v.trim();
+                        if let Some(hex) = v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")) {
+                            u64::from_str_radix(hex, 16)
+                        } else {
+                            v.parse::<u64>()
+                        }
+                    })
+                    .collect::<std::result::Result<Vec<u64>, _>>()
+            })
+            .transpose()
+            .map_err(|_| Error::ParsePlatformDeviceInvalidMap)?
+            .unwrap_or_default();
+        let irq = parser
+            .convert::<u32>("irq")
+            .map_err(Error::ParsePlatformDevice)?;
+
+        Ok(PlatformDeviceConfig {
+            id,
+            group,
+            device_name,
+            map,
+            irq,
+        })
+    }
+}
+
 impl UserDeviceConfig {
     pub const SYNTAX: &'static str = "Userspace device socket=<socket_path>,id=<device_id>,\
         pci_segment=<segment_id>,pci_device_id=<pci_slot>\"";
@@ -3597,6 +3665,16 @@ impl VmConfig {
             devices = Some(device_config_list);
         }
 
+        let mut platform_devices: Option<Vec<PlatformDeviceConfig>> = None;
+        if let Some(platform_device_list) = &vm_params.platform_devices {
+            let mut platform_device_config_list = Vec::new();
+            for item in platform_device_list.iter() {
+                let platform_device_config = PlatformDeviceConfig::parse(item)?;
+                platform_device_config_list.push(platform_device_config);
+            }
+            platform_devices = Some(platform_device_config_list);
+        }
+
         let mut user_devices: Option<Vec<UserDeviceConfig>> = None;
         if let Some(user_device_list) = &vm_params.user_devices {
             let mut user_device_config_list = Vec::new();
@@ -3716,6 +3794,7 @@ impl VmConfig {
             #[cfg(target_arch = "x86_64")]
             debug_console,
             devices,
+            platform_devices,
             user_devices,
             vdpa,
             vsock,
@@ -3858,6 +3937,7 @@ impl Clone for VmConfig {
             #[cfg(target_arch = "x86_64")]
             debug_console: self.debug_console.clone(),
             devices: self.devices.clone(),
+            platform_devices: self.platform_devices.clone(),
             user_devices: self.user_devices.clone(),
             vdpa: self.vdpa.clone(),
             vsock: self.vsock.clone(),
@@ -5232,6 +5312,7 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
             #[cfg(target_arch = "x86_64")]
             debug_console: DebugConsoleConfig::default(),
             devices: None,
+            platform_devices: None,
             user_devices: None,
             vdpa: None,
             vsock: None,
@@ -5490,6 +5571,7 @@ id=\"{id}\",pci_segment={pci_segment},queue_sizes={queue_sizes}"
             #[cfg(target_arch = "x86_64")]
             debug_console: DebugConsoleConfig::default(),
             devices: None,
+            platform_devices: None,
             user_devices: None,
             vdpa: None,
             vsock: None,

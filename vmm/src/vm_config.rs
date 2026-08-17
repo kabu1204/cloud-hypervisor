@@ -802,6 +802,28 @@ pub struct DeviceConfig {
     pub x_exclude_mmap_bars: Vec<u64>,
 }
 
+#[serde_with::skip_serializing_none]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PlatformDeviceConfig {
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Path to the VFIO (noiommu) group device, e.g. /dev/vfio/noiommu-15.
+    pub group: PathBuf,
+    /// Platform device name used with VFIO_GROUP_GET_DEVICE_FD
+    /// (e.g. "fdad0000.npu"). When omitted, it is derived from the
+    /// group's /sys/kernel/iommu_groups/<id>/devices directory.
+    #[serde(default)]
+    pub device_name: Option<String>,
+    /// Guest physical addresses at which the VFIO regions are mapped, one
+    /// per region in region index order. A single value means the regions
+    /// are packed contiguously starting at that address.
+    #[serde(default)]
+    pub map: Vec<u64>,
+    /// SPI interrupt number wired to the guest vGIC (INTID = irq + 32).
+    #[serde(default)]
+    pub irq: Option<u32>,
+}
+
 fn deserialize_deviceconfig_fd<'de, D>(d: D) -> Result<Option<i32>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1189,6 +1211,7 @@ pub struct VmConfig {
     #[serde(default)]
     pub debug_console: DebugConsoleConfig,
     pub devices: Option<Vec<DeviceConfig>>,
+    pub platform_devices: Option<Vec<PlatformDeviceConfig>>,
     pub user_devices: Option<Vec<UserDeviceConfig>>,
     pub vdpa: Option<Vec<VdpaConfig>>,
     pub vsock: Option<VsockConfig>,

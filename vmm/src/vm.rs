@@ -1932,6 +1932,23 @@ impl Vm {
                 ))
             })?;
 
+        // Emit the guest FDT nodes for the passed-through NPU core 2 when
+        // both the core (region 0 at 0xfdad0000) and its IOMMU (region 0 at
+        // 0xfdada000) are passed through as platform devices.
+        let npu_core = {
+            let config = self.config.lock().unwrap();
+            config.platform_devices.as_ref().and_then(|pds| {
+                let core = pds.iter().find(|d| d.map.first() == Some(&0xfdad_0000));
+                let mmu = pds.iter().find(|d| d.map.first() == Some(&0xfdad_a000));
+                match (core, mmu) {
+                    (Some(core), Some(_)) => Some(arch::aarch64::fdt::NpuCoreFdtInfo {
+                        irq_spi: core.irq.unwrap_or(112),
+                    }),
+                    _ => None,
+                }
+            })
+        };
+
         arch::configure_system(
             &mem,
             cmdline.as_cstring().unwrap().to_str().unwrap(),
@@ -1944,6 +1961,7 @@ impl Vm {
             &vgic,
             &self.numa_nodes,
             pmu_supported,
+            npu_core.as_ref(),
         )
         .map_err(Error::ConfigureSystem)?;
 
@@ -4035,6 +4053,7 @@ mod unit_tests {
             &BTreeMap::new(),
             None,
             true,
+            None,
         )
         .unwrap();
     }

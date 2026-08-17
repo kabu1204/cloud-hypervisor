@@ -183,6 +183,10 @@ pub enum DeviceManagerError {
     #[error("Cannot create EventFd")]
     EventFd(#[source] io::Error),
 
+    /// Cannot create VFIO platform device
+    #[error("Cannot create VFIO platform device")]
+    CreatePlatformDevice(#[source] crate::platform_device::PlatformDeviceError),
+
     /// Cannot open disk path
     #[error("Cannot open disk path")]
     Disk(#[source] BlockError),
@@ -1085,6 +1089,12 @@ pub struct DeviceManager {
     // Passthrough device handle
     passthrough_device: Option<VfioDeviceFd>,
 
+    // VFIO platform passthrough devices (e.g. NPU core and its IOMMU).
+    // Held to keep the group/device fds, MMIO mappings and IRQ eventfds
+    // alive for the lifetime of the VM.
+    #[allow(dead_code)]
+    platform_devices: Vec<crate::platform_device::VfioPlatformDevice>,
+
     // VFIO operation instance
     // Only one can be created, therefore it is stored as part of the
     // DeviceManager to be reused.
@@ -1449,6 +1459,7 @@ impl DeviceManager {
             #[cfg(feature = "pvmemcontrol")]
             pvmemcontrol_devices: None,
             pvpanic_device: None,
+            platform_devices: Vec::new(),
             force_access_platform,
             boot_id_list,
             #[cfg(not(target_arch = "riscv64"))]
@@ -1567,6 +1578,7 @@ impl DeviceManager {
 
         self.make_virtio_devices(snapshot)?;
         self.add_pci_devices(snapshot)?;
+        self.add_platform_devices(snapshot)?;
 
         // Add pvmemcontrol if required
         #[cfg(feature = "pvmemcontrol")]
@@ -1678,6 +1690,33 @@ impl DeviceManager {
     }
 
     #[allow(unused_variables)]
+    // Create VFIO platform devices passed through with --platform-device.
+    // This runs after the interrupt controller (vGIC) has been created,
+    // which is required for irqfd registration.
+    fn add_platform_devices(&mut self, snapshot: Option<&Snapshot>) -> DeviceManagerResult<()> {
+        if snapshot.is_some() {
+            if self.config.lock().unwrap().platform_devices.is_some() {
+                warn!("VFIO platform devices are not restored from a snapshot");
+            }
+            return Ok(());
+        }
+        let configs = self.config.lock().unwrap().platform_devices.clone();
+        if let Some(configs) = configs {
+            let slot_allocator = self.memory_manager.lock().unwrap().memory_slot_allocator();
+            for cfg in &configs {
+                let device = crate::platform_device::VfioPlatformDevice::new(
+                    cfg,
+                    &self.address_manager.vm,
+                    &slot_allocator,
+                )
+                .map_err(DeviceManagerError::CreatePlatformDevice)?;
+                info!("Created VFIO platform device: {device:?}");
+                self.platform_devices.push(device);
+            }
+        }
+        Ok(())
+    }
+
     fn add_pci_devices(&mut self, snapshot: Option<&Snapshot>) -> DeviceManagerResult<()> {
         let iommu_id = String::from(IOMMU_DEVICE_NAME);
 

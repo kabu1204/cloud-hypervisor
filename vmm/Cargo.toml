@@ -87,6 +87,7 @@ signal-hook = { workspace = true }
 thiserror = { workspace = true }
 tracer = { path = "../tracer" }
 uuid = { workspace = true }
+vfio-bindings = { workspace = true, default-features = false }
 vfio-ioctls = { workspace = true, default-features = false }
 vfio_user = { workspace = true }
 vhost = { workspace = true }

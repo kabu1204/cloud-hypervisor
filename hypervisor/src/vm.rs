@@ -344,6 +344,19 @@ pub trait Vm: Send + Sync + Any {
     fn create_irq_chip(&self) -> Result<()>;
     /// Registers an event that will, when signaled, trigger the `gsi` IRQ.
     fn register_irqfd(&self, fd: &EventFd, gsi: u32) -> Result<()>;
+    /// Registers an event with a resample eventfd that will, when signaled,
+    /// trigger the `gsi` IRQ. Required for level-triggered interrupts
+    /// (e.g. VFIO platform devices with a shared level IRQ).
+    fn register_irqfd_with_resample(
+        &self,
+        _fd: &EventFd,
+        _resample_fd: &EventFd,
+        _gsi: u32,
+    ) -> Result<()> {
+        Err(HypervisorVmError::RegisterIrqFd(anyhow::anyhow!(
+            "irqfd with resamplefd not supported by this hypervisor"
+        )))
+    }
     /// Unregister an event that will, when signaled, trigger the `gsi` IRQ.
     fn unregister_irqfd(&self, fd: &EventFd, gsi: u32) -> Result<()>;
     /// Creates a new KVM vCPU file descriptor and maps the memory corresponding

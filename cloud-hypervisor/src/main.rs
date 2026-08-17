@@ -39,9 +39,9 @@ use vmm::vm_config::FwCfgConfig;
 use vmm::vm_config::IvshmemConfig;
 use vmm::vm_config::{
     BalloonConfig, ConsoleConfig, DeviceConfig, DiskConfig, FsConfig, GenericVhostUserConfig,
-    LandlockConfig, NetConfig, NumaConfig, PciSegmentConfig, PlatformConfig, PmemConfig,
-    RateLimiterGroupConfig, RngConfig, RtcConfig, SerialConfig, TpmConfig, UserDeviceConfig,
-    VdpaConfig, VmConfig, VsockConfig,
+    LandlockConfig, NetConfig, NumaConfig, PciSegmentConfig, PlatformConfig, PlatformDeviceConfig,
+    PmemConfig, RateLimiterGroupConfig, RngConfig, RtcConfig, SerialConfig, TpmConfig,
+    UserDeviceConfig, VdpaConfig, VmConfig, VsockConfig,
 };
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::block_signal;
@@ -411,6 +411,12 @@ fn get_cli_options_sorted(
             .help(PlatformConfig::syntax())
             .num_args(1)
             .group("vm-config"),
+        Arg::new("platform-device")
+            .long("platform-device")
+            .help(PlatformDeviceConfig::SYNTAX)
+            .num_args(1..)
+            .action(ArgAction::Append)
+            .group("vm-config"),
         Arg::new("pmem")
             .long("pmem")
             .help(PmemConfig::SYNTAX)
@@ -462,6 +468,12 @@ fn get_cli_options_sorted(
             .help(SerialConfig::SYNTAX)
             .default_value("null")
             .group("vm-config"),
+        Arg::new("test-rknn-probe")
+            .long("test-rknn-probe")
+            .help("Probe the RK3588 NPU core 2 VFIO noiommu setup and exit (debug)")
+            .num_args(0)
+            .action(ArgAction::SetTrue)
+            .hide(true),
         Arg::new("tpm")
             .long("tpm")
             .num_args(1)
@@ -934,6 +946,16 @@ fn main() {
         return;
     }
 
+    if cmd_arguments.get_flag("test-rknn-probe") {
+        match vmm::platform_device::rknn_probe() {
+            Ok(()) => process::exit(0),
+            Err(e) => {
+                eprintln!("rknn_probe failed: {e}");
+                process::exit(1);
+            }
+        }
+    }
+
     if let Err(e) = expand_fdtable() {
         warn!("Error expanding FD table: {e}");
     }
@@ -1096,6 +1118,7 @@ mod unit_tests {
             #[cfg(target_arch = "x86_64")]
             debug_console: DebugConsoleConfig::default(),
             devices: None,
+            platform_devices: None,
             user_devices: None,
             vdpa: None,
             vsock: None,

@@ -40,6 +40,12 @@ const GIC_PHANDLE: u32 = 1;
 const MSI_PHANDLE: u32 = 2;
 // This is a value for uniquely identifying the FDT node containing the clock definition.
 const CLOCK_PHANDLE: u32 = 3;
+
+// Phandles for the RK3588 NPU passthrough nodes. CPU and cache phandles are
+// allocated dynamically starting at FIRST_VCPU_PHANDLE, so use values well
+// above the static range.
+const NPU_CLK_PHANDLE: u32 = 0xf00;
+const RKNN_MMU_PHANDLE: u32 = 0xf01;
 // This is a value for uniquely identifying the FDT node containing the gpio controller.
 const GPIO_PHANDLE: u32 = 4;
 // This is a value for virtio-iommu. Now only one virtio-iommu device is supported.
@@ -104,6 +110,7 @@ pub fn create_fdt<T: DeviceInfoForFdt + Clone + Debug, S: BuildHasher>(
     numa_nodes: &NumaNodes,
     virtio_iommu_bdf: Option<u32>,
     pmu_supported: bool,
+    npu_core: Option<&NpuCoreFdtInfo>,
 ) -> FdtWriterResult<Vec<u8>> {
     // Allocate stuff necessary for the holding the blob.
     let mut fdt = FdtWriter::new().unwrap();
@@ -136,6 +143,9 @@ pub fn create_fdt<T: DeviceInfoForFdt + Clone + Debug, S: BuildHasher>(
     create_pci_nodes(&mut fdt, pci_space_info, virtio_iommu_bdf)?;
     if numa_nodes.len() > 1 {
         create_distance_map_node(&mut fdt, numa_nodes)?;
+    }
+    if let Some(npu_core) = npu_core {
+        create_npu_nodes(&mut fdt, npu_core)?;
     }
 
     // End Header node.
@@ -564,6 +574,77 @@ fn create_gic_node(fdt: &mut FdtWriter, gic_device: &Arc<Mutex<dyn Vgic>>) -> Fd
     }
 
     fdt.end_node(intc_node)?;
+
+    Ok(())
+}
+
+/// Information needed to emit the RK3588 NPU core 2 passthrough nodes.
+/// The register windows and IRQ are the physical ones of the reserved core
+/// (fdad0000.npu + fdada000.iommu); the MMIO regions must be mapped into the
+/// guest at these same addresses by the platform device passthrough.
+#[derive(Clone, Debug)]
+pub struct NpuCoreFdtInfo {
+    /// SPI interrupt number shared by the NPU core and its IOMMU.
+    pub irq_spi: u32,
+}
+
+// Create the device tree nodes describing the passed-through RK3588 NPU
+// core 2 and its private IOMMU (rknn MMU). Both nodes are driven by the
+// guest kernel: the rockchip-iommu driver binds rknn_mmu_2 and the rocket
+// (rknn) driver binds npu@fdad0000.
+fn create_npu_nodes(fdt: &mut FdtWriter, info: &NpuCoreFdtInfo) -> FdtWriterResult<()> {
+    let irq = [GIC_FDT_IRQ_TYPE_SPI, info.irq_spi, IRQ_TYPE_LEVEL_HI];
+
+    let clk_node = fdt.begin_node("npu-clk")?;
+    fdt.property_string("compatible", "fixed-clock")?;
+    fdt.property_u32("#clock-cells", 0)?;
+    fdt.property_u32("clock-frequency", 200_000_000)?;
+    fdt.property_string("clock-output-names", "npu-clk")?;
+    fdt.property_u32("phandle", NPU_CLK_PHANDLE)?;
+    fdt.end_node(clk_node)?;
+
+    let mmu_node = fdt.begin_node("iommu@fdada000")?;
+    fdt.property(
+        "compatible",
+        b"rockchip,rk3588-iommu\0rockchip,rk3568-iommu\0",
+    )?;
+    fdt.property_array_u64("reg", &[0xfdad_a000, 0x100])?;
+    fdt.property_array_u32("interrupts", &irq)?;
+    fdt.property_array_u32("clocks", &[NPU_CLK_PHANDLE, NPU_CLK_PHANDLE])?;
+    fdt.property_string_list(
+        "clock-names",
+        vec![String::from("aclk"), String::from("iface")],
+    )?;
+    fdt.property_u32("#iommu-cells", 0)?;
+    fdt.property_u32("phandle", RKNN_MMU_PHANDLE)?;
+    fdt.end_node(mmu_node)?;
+
+    let npu_node = fdt.begin_node("npu@fdad0000")?;
+    fdt.property_string("compatible", "rockchip,rk3588-rknn-core")?;
+    fdt.property_array_u64(
+        "reg",
+        &[
+            0xfdad_0000,
+            0x1000, // pc
+            0xfdad_1000,
+            0x1000, // cna
+            0xfdad_3000,
+            0x1000, // core
+        ],
+    )?;
+    fdt.property_string_list(
+        "reg-names",
+        vec![
+            String::from("pc"),
+            String::from("cna"),
+            String::from("core"),
+        ],
+    )?;
+    fdt.property_array_u32("interrupts", &irq)?;
+    fdt.property_array_u32("clocks", &[NPU_CLK_PHANDLE])?;
+    fdt.property_u32("iommus", RKNN_MMU_PHANDLE)?;
+    fdt.property_string("status", "okay")?;
+    fdt.end_node(npu_node)?;
 
     Ok(())
 }
@@ -1183,5 +1264,76 @@ mod tests {
         let mut fdt = FdtWriter::new().unwrap();
         let result = create_distance_map_node(&mut fdt, &numa_nodes);
         assert!(result.is_ok(), "Should default to 20 for missing distances");
+    }
+
+    #[test]
+    fn test_create_npu_nodes() {
+        let mut fdt = FdtWriter::new().unwrap();
+        let root = fdt.begin_node("").unwrap();
+        fdt.property_u32("#address-cells", 2).unwrap();
+        fdt.property_u32("#size-cells", 2).unwrap();
+        create_npu_nodes(&mut fdt, &NpuCoreFdtInfo { irq_spi: 112 }).unwrap();
+        fdt.end_node(root).unwrap();
+        let blob = fdt.finish().unwrap();
+
+        // Optionally write the blob out for external inspection (dtc).
+        if let Ok(path) = std::env::var("FDT_DUMP_PATH") {
+            std::fs::write(path, &blob).unwrap();
+        }
+
+        // Node names and compatible strings must be present in the string
+        // table / structure block.
+        for needle in [
+            b"npu@fdad0000\0".as_slice(),
+            b"iommu@fdada000\0".as_slice(),
+            b"npu-clk\0".as_slice(),
+            b"rockchip,rk3588-rknn-core\0".as_slice(),
+            b"rockchip,rk3588-iommu\0".as_slice(),
+            b"rockchip,rk3568-iommu\0".as_slice(),
+            b"fixed-clock\0".as_slice(),
+        ] {
+            assert!(
+                blob.windows(needle.len()).any(|w| w == needle),
+                "missing {needle:?}"
+            );
+        }
+
+        // interrupts = <GIC_SPI 112 IRQ_TYPE_LEVEL_HIGH>
+        let interrupts = [0u32, 112, 4]
+            .iter()
+            .flat_map(|v| v.to_be_bytes())
+            .collect::<Vec<_>>();
+        assert!(
+            blob.windows(interrupts.len()).any(|w| w == interrupts),
+            "missing interrupts encoding"
+        );
+
+        // npu reg: <0x0 0xfdad0000 0x0 0x1000>, ...
+        let reg = [
+            0xfdad_0000u64,
+            0x1000,
+            0xfdad_1000,
+            0x1000,
+            0xfdad_3000,
+            0x1000,
+        ]
+        .iter()
+        .flat_map(|v| v.to_be_bytes())
+        .collect::<Vec<_>>();
+        assert!(blob.windows(reg.len()).any(|w| w == reg), "missing npu reg");
+
+        // iommus = <&rknn_mmu_2> and the mmu node phandle
+        let phandle = RKNN_MMU_PHANDLE.to_be_bytes();
+        assert!(blob.windows(4).filter(|w| *w == phandle).count() >= 2);
+
+        // iommu reg: <0x0 0xfdada000 0x0 0x100>
+        let mmu_reg = [0xfdad_a000u64, 0x100]
+            .iter()
+            .flat_map(|v| v.to_be_bytes())
+            .collect::<Vec<_>>();
+        assert!(
+            blob.windows(mmu_reg.len()).any(|w| w == mmu_reg),
+            "missing iommu reg"
+        );
     }
 }

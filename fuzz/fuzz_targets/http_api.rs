@@ -193,6 +193,7 @@ impl RequestHandler for StubApiRequestHandler {
                 #[cfg(target_arch = "x86_64")]
                 debug_console: DebugConsoleConfig::default(),
                 devices: None,
+                platform_devices: None,
                 user_devices: None,
                 vdpa: None,
                 vsock: None,
