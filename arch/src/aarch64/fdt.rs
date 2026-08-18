@@ -578,22 +578,27 @@ fn create_gic_node(fdt: &mut FdtWriter, gic_device: &Arc<Mutex<dyn Vgic>>) -> Fd
     Ok(())
 }
 
-/// Information needed to emit the RK3588 NPU core 2 passthrough nodes.
-/// The register windows and IRQ are the physical ones of the reserved core
-/// (fdad0000.npu + fdada000.iommu); the MMIO regions must be mapped into the
-/// guest at these same addresses by the platform device passthrough.
+/// Information needed to emit the RK3588 NPU core passthrough nodes.
+/// The register windows are the physical ones of the reserved core; the
+/// MMIO regions must be mapped into the guest at these same addresses by
+/// the platform device passthrough.
 #[derive(Clone, Debug)]
 pub struct NpuCoreFdtInfo {
     /// SPI interrupt number shared by the NPU core and its IOMMU.
     pub irq_spi: u32,
+    /// Physical MMIO base of the core (0xfdab0000/0xfdac0000/0xfdad0000
+    /// for cores 0/1/2). The core's private IOMMU window is at base+0xa000.
+    pub base: u64,
 }
 
 // Create the device tree nodes describing the passed-through RK3588 NPU
-// core 2 and its private IOMMU (rknn MMU). Both nodes are driven by the
-// guest kernel: the rockchip-iommu driver binds rknn_mmu_2 and the rocket
-// (rknn) driver binds npu@fdad0000.
+// core and its private IOMMU (rknn MMU). Both nodes are driven by the
+// guest kernel: the rockchip-iommu driver binds the MMU and the rocket
+// (rknn) driver binds the npu@ node.
 fn create_npu_nodes(fdt: &mut FdtWriter, info: &NpuCoreFdtInfo) -> FdtWriterResult<()> {
     let irq = [GIC_FDT_IRQ_TYPE_SPI, info.irq_spi, IRQ_TYPE_LEVEL_HI];
+    let base = info.base;
+    let mmu_base = base + 0xa000;
 
     let clk_node = fdt.begin_node("npu-clk")?;
     fdt.property_string("compatible", "fixed-clock")?;
@@ -603,12 +608,12 @@ fn create_npu_nodes(fdt: &mut FdtWriter, info: &NpuCoreFdtInfo) -> FdtWriterResu
     fdt.property_u32("phandle", NPU_CLK_PHANDLE)?;
     fdt.end_node(clk_node)?;
 
-    let mmu_node = fdt.begin_node("iommu@fdada000")?;
+    let mmu_node = fdt.begin_node(&format!("iommu@{mmu_base:x}"))?;
     fdt.property(
         "compatible",
         b"rockchip,rk3588-iommu\0rockchip,rk3568-iommu\0",
     )?;
-    fdt.property_array_u64("reg", &[0xfdad_a000, 0x100])?;
+    fdt.property_array_u64("reg", &[mmu_base, 0x100])?;
     fdt.property_array_u32("interrupts", &irq)?;
     fdt.property_array_u32("clocks", &[NPU_CLK_PHANDLE, NPU_CLK_PHANDLE])?;
     fdt.property_string_list(
@@ -619,16 +624,16 @@ fn create_npu_nodes(fdt: &mut FdtWriter, info: &NpuCoreFdtInfo) -> FdtWriterResu
     fdt.property_u32("phandle", RKNN_MMU_PHANDLE)?;
     fdt.end_node(mmu_node)?;
 
-    let npu_node = fdt.begin_node("npu@fdad0000")?;
+    let npu_node = fdt.begin_node(&format!("npu@{base:x}"))?;
     fdt.property_string("compatible", "rockchip,rk3588-rknn-core")?;
     fdt.property_array_u64(
         "reg",
         &[
-            0xfdad_0000,
+            base,
             0x1000, // pc
-            0xfdad_1000,
+            base + 0x1000,
             0x1000, // cna
-            0xfdad_3000,
+            base + 0x3000,
             0x1000, // core
         ],
     )?;
@@ -1272,7 +1277,14 @@ mod tests {
         let root = fdt.begin_node("").unwrap();
         fdt.property_u32("#address-cells", 2).unwrap();
         fdt.property_u32("#size-cells", 2).unwrap();
-        create_npu_nodes(&mut fdt, &NpuCoreFdtInfo { irq_spi: 112 }).unwrap();
+        create_npu_nodes(
+            &mut fdt,
+            &NpuCoreFdtInfo {
+                irq_spi: 112,
+                base: 0xfdad_0000,
+            },
+        )
+        .unwrap();
         fdt.end_node(root).unwrap();
         let blob = fdt.finish().unwrap();
 

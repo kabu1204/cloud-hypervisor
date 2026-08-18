@@ -1760,7 +1760,11 @@ impl MemoryManager {
                 // Identity-mapped guest RAM: skip the zone-based memfd
                 // allocation and map the host physical carve-out through
                 // /dev/mem at GPA == HPA.
-                let region = Self::create_identity_ram_region(config.identity_base, ram_size)?;
+                let region = Self::create_identity_ram_region(
+                    config.identity_base,
+                    ram_size,
+                    &config.identity_dev,
+                )?;
                 let mut memory_zones = HashMap::new();
                 // SAFETY: FFI call. Trivially safe.
                 let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as u64 };
@@ -2088,20 +2092,21 @@ impl MemoryManager {
     }
 
     /// Create the single guest RAM region for identity-mapped memory: map
-    /// the host physical carve-out through the `npu_guestmem` char device
+    /// the host physical carve-out through an `npu_guestmem` char device
     /// (cacheable remap_pfn_range of the reserved range; /dev/mem on arm64
     /// maps Device memory, which is unusable as guest RAM: BUS_ADRALN on
     /// wide accesses) and place it at guest physical address `identity_base`
-    /// (GPA == HPA, with `npu_guestmem` base == identity_base).
+    /// (GPA == HPA, with the region's `npu_guestmem` base == identity_base).
     #[cfg(target_os = "linux")]
     fn create_identity_ram_region(
         identity_base: u64,
         size: u64,
+        identity_dev: &str,
     ) -> Result<Arc<GuestRegionMmap>, Error> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
-            .open("/dev/npu_guestmem")
+            .open(identity_dev)
             .map_err(Error::IdentityMapOpenDevMem)?;
 
         // SAFETY: FFI call with a valid fd; the npu_guestmem module exposes
@@ -2151,6 +2156,7 @@ impl MemoryManager {
     fn create_identity_ram_region(
         _identity_base: u64,
         _size: u64,
+        _identity_dev: &str,
     ) -> Result<Arc<GuestRegionMmap>, Error> {
         Err(Error::IdentityMapOpenDevMem(io::Error::other(
             "'identity_map' is only supported on Linux",

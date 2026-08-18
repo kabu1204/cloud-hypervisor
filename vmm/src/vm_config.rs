@@ -294,6 +294,10 @@ fn default_memoryconfig_identity_base() -> u64 {
     0x1_c000_0000
 }
 
+pub(crate) fn default_memoryconfig_identity_dev() -> String {
+    "/dev/npu_guestmem0".to_owned()
+}
+
 fn default_cpusconfig_nested() -> bool {
     true
 }
@@ -331,6 +335,9 @@ pub struct MemoryConfig {
     /// Host physical base address of the identity-mapped carve-out.
     #[serde(default = "default_memoryconfig_identity_base")]
     pub identity_base: u64,
+    /// Char device exposing the identity-mapped carve-out (one per region).
+    #[serde(default = "default_memoryconfig_identity_dev")]
+    pub identity_dev: String,
 }
 
 pub const DEFAULT_MEMORY_MB: u64 = 512;
@@ -352,6 +359,7 @@ impl Default for MemoryConfig {
             thp: true,
             identity_map: false,
             identity_base: default_memoryconfig_identity_base(),
+            identity_dev: default_memoryconfig_identity_dev(),
         }
     }
 }

@@ -1932,20 +1932,24 @@ impl Vm {
                 ))
             })?;
 
-        // Emit the guest FDT nodes for the passed-through NPU core 2 when
-        // both the core (region 0 at 0xfdad0000) and its IOMMU (region 0 at
-        // 0xfdada000) are passed through as platform devices.
+        // Emit the guest FDT nodes for a passed-through RK3588 NPU core
+        // when both the core (region 0 at 0xfdab/0xfdac/0xfdad0000) and its
+        // private IOMMU (base + 0xa000) are passed as platform devices.
+        const NPU_CORE_BASES: [u64; 3] = [0xfdab_0000, 0xfdac_0000, 0xfdad_0000];
         let npu_core = {
             let config = self.config.lock().unwrap();
             config.platform_devices.as_ref().and_then(|pds| {
-                let core = pds.iter().find(|d| d.map.first() == Some(&0xfdad_0000));
-                let mmu = pds.iter().find(|d| d.map.first() == Some(&0xfdad_a000));
-                match (core, mmu) {
-                    (Some(core), Some(_)) => Some(arch::aarch64::fdt::NpuCoreFdtInfo {
-                        irq_spi: core.irq.unwrap_or(112),
-                    }),
-                    _ => None,
-                }
+                NPU_CORE_BASES.iter().find_map(|&base| {
+                    let core = pds.iter().find(|d| d.map.first() == Some(&base));
+                    let mmu = pds.iter().find(|d| d.map.first() == Some(&(base + 0xa000)));
+                    match (core, mmu) {
+                        (Some(core), Some(_)) => Some(arch::aarch64::fdt::NpuCoreFdtInfo {
+                            irq_spi: core.irq.unwrap_or(112),
+                            base,
+                        }),
+                        _ => None,
+                    }
+                })
             })
         };
 

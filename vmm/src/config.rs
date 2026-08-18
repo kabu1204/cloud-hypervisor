@@ -1110,7 +1110,8 @@ impl MemoryConfig {
             .add("reserve")
             .add("thp")
             .add("identity_map")
-            .add("identity_base");
+            .add("identity_base")
+            .add("identity_dev");
         parser.parse(memory).map_err(Error::ParseMemory)?;
 
         let size = parser
@@ -1187,6 +1188,11 @@ impl MemoryConfig {
             }
             None => 0x1_c000_0000,
         };
+
+        let identity_dev = parser
+            .get("identity_dev")
+            .map(|s| s.trim().to_owned())
+            .unwrap_or_else(default_memoryconfig_identity_dev);
 
         let zones: Option<Vec<MemoryZoneConfig>> = if let Some(memory_zones) = &memory_zones {
             let mut zones = Vec::new();
@@ -1291,6 +1297,7 @@ impl MemoryConfig {
             thp,
             identity_map,
             identity_base,
+            identity_dev,
         })
     }
 
