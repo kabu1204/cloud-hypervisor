@@ -511,6 +511,7 @@ pub struct VmParams<'a> {
     pub pvpanic: bool,
     pub numa: Option<Vec<&'a str>>,
     pub watchdog: bool,
+    pub npu: bool,
     pub rtc: Option<&'a str>,
     #[cfg(feature = "guest_debug")]
     pub gdb: bool,
@@ -585,6 +586,7 @@ impl<'a> VmParams<'a> {
             .get_many::<String>("numa")
             .map(|x| x.map(|y| y as &str).collect());
         let watchdog = args.get_flag("watchdog");
+        let npu = args.get_flag("npu");
         let rtc: Option<&str> = args.get_one::<String>("rtc").map(|x| x as &str);
         let pci_segments: Option<Vec<&str>> = args
             .get_many::<String>("pci-segment")
@@ -636,6 +638,7 @@ impl<'a> VmParams<'a> {
             pvpanic,
             numa,
             watchdog,
+            npu,
             rtc,
             #[cfg(feature = "guest_debug")]
             gdb,
@@ -3811,6 +3814,7 @@ impl VmConfig {
             iommu: false, // updated in VmConfig::validate()
             numa,
             watchdog: vm_params.watchdog,
+            npu: vm_params.npu,
             rtc,
             #[cfg(feature = "guest_debug")]
             gdb,

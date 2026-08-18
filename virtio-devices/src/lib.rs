@@ -35,6 +35,7 @@ pub mod transport;
 pub mod vdpa;
 pub mod vhost_user;
 pub mod vsock;
+pub mod npu;
 pub mod watchdog;
 
 use vm_memory::bitmap::AtomicBitmap;
@@ -59,6 +60,7 @@ pub use self::rng::Rng;
 pub use self::rtc::Rtc;
 pub use self::vdpa::{Vdpa, VdpaDmaMapping};
 pub use self::vsock::Vsock;
+pub use self::npu::Npu;
 pub use self::watchdog::Watchdog;
 
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<AtomicBitmap>;

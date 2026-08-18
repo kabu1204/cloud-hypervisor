@@ -32,6 +32,7 @@ pub enum Thread {
     VirtioVhostNet,
     VirtioVhostNetCtl,
     VirtioVsock,
+    VirtioNpu,
     VirtioWatchdog,
 }
 
@@ -312,6 +313,17 @@ fn virtio_vsock_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
     ]
 }
 
+fn virtio_npu_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
+    vec![
+        (libc::SYS_ioctl, vec![]),
+        (libc::SYS_mmap, vec![]),
+        (libc::SYS_munmap, vec![]),
+        (libc::SYS_openat, vec![]),
+        (libc::SYS_sched_getaffinity, vec![]),
+        (libc::SYS_set_robust_list, vec![]),
+    ]
+}
+
 fn virtio_watchdog_thread_rules() -> Vec<(i64, Vec<SeccompRule>)> {
     vec![
         (libc::SYS_sched_getaffinity, vec![]),
@@ -338,6 +350,7 @@ fn get_seccomp_rules(thread_type: Thread) -> Vec<(i64, Vec<SeccompRule>)> {
         Thread::VirtioVhostNet => virtio_vhost_net_thread_rules(),
         Thread::VirtioVhostNetCtl => virtio_vhost_net_ctl_thread_rules(),
         Thread::VirtioVsock => virtio_vsock_thread_rules(),
+        Thread::VirtioNpu => virtio_npu_thread_rules(),
         Thread::VirtioWatchdog => virtio_watchdog_thread_rules(),
     };
     rules.append(&mut virtio_thread_common());
@@ -388,5 +401,18 @@ pub fn get_seccomp_filter(
         )
         .and_then(|filter| filter.try_into())
         .map_err(Error::Backend),
+    }
+}
+
+#[cfg(test)]
+mod npu_filter_tests {
+    use super::*;
+
+    #[test]
+    fn npu_rules_contain_unconditional_ioctl() {
+        let rules: std::collections::BTreeMap<i64, Vec<SeccompRule>> =
+            get_seccomp_rules(Thread::VirtioNpu).into_iter().collect();
+        assert!(rules.contains_key(&libc::SYS_ioctl), "ioctl rule missing!");
+        assert!(rules[&libc::SYS_ioctl].is_empty(), "ioctl rule not unconditional");
     }
 }

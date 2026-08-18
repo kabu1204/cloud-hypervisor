@@ -513,6 +513,12 @@ fn get_cli_options_sorted(
             .num_args(0)
             .action(ArgAction::SetTrue)
             .group("vm-config"),
+        Arg::new("npu")
+            .long("npu")
+            .help("Enable virtio-npu (host /dev/accel/accel0 backend)")
+            .num_args(0)
+            .action(ArgAction::SetTrue)
+            .group("vm-config"),
     ]
     .to_vec()
     .into_boxed_slice()
@@ -1128,6 +1134,7 @@ mod unit_tests {
             iommu: false,
             numa: None,
             watchdog: false,
+            npu: false,
             rtc: None,
             #[cfg(feature = "guest_debug")]
             gdb: false,

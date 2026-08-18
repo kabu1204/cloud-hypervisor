@@ -1233,6 +1233,9 @@ pub struct VmConfig {
     pub numa: Option<Box<[NumaConfig]>>,
     #[serde(default)]
     pub watchdog: bool,
+    /// Enable the virtio-npu backend device (host /dev/accel/accel0)
+    #[serde(default)]
+    pub npu: bool,
     #[serde(default)]
     pub rtc: Option<RtcConfig>,
     #[cfg(feature = "guest_debug")]

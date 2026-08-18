@@ -280,6 +280,10 @@ pub enum DeviceManagerError {
     #[error("Cannot create virtio-watchdog device")]
     CreateVirtioWatchdog(#[source] io::Error),
 
+    /// Cannot create virtio-npu device
+    #[error("Cannot create virtio-npu device")]
+    CreateVirtioNpu(#[source] io::Error),
+
     /// Cannot create serial manager
     #[error("Cannot create serial manager")]
     CreateSerialManager(#[source] SerialManagerError),
@@ -2703,6 +2707,9 @@ impl DeviceManager {
         // Add virtio-watchdog device
         self.make_virtio_watchdog_devices(snapshot)?;
 
+        // Add virtio-npu device
+        self.make_virtio_npu_devices(snapshot)?;
+
         // Add vDPA devices if required
         self.make_vdpa_devices(snapshot)?;
 
@@ -3762,6 +3769,44 @@ impl DeviceManager {
                 .insert(id.clone(), device_node!(id, virtio_balloon_device));
         }
 
+        Ok(())
+    }
+
+    fn make_virtio_npu_devices(
+        &mut self,
+        _snapshot: Option<&Snapshot>,
+    ) -> DeviceManagerResult<()> {
+        if !self.config.lock().unwrap().npu {
+            return Ok(());
+        }
+
+        let id = String::from("__npu");
+        info!("Creating virtio-npu device: id = {id}");
+
+        let virtio_npu_device = Arc::new(Mutex::new(
+            virtio_devices::Npu::new(
+                id.clone(),
+                std::path::PathBuf::from("/dev/accel/accel0"),
+                self.seccomp_action.clone(),
+                self.exit_evt
+                    .try_clone()
+                    .map_err(DeviceManagerError::EventFd)?,
+            )
+            .map_err(DeviceManagerError::CreateVirtioNpu)?,
+        ));
+        self.virtio_devices.push(MetaVirtioDevice {
+            virtio_device: Arc::clone(&virtio_npu_device)
+                as Arc<Mutex<dyn virtio_devices::VirtioDevice>>,
+            pci_common: PciDeviceCommonConfig {
+                id: Some(id.clone()),
+                ..Default::default()
+            },
+            dma_handler: None,
+        });
+        self.device_tree
+            .lock()
+            .unwrap()
+            .insert(id.clone(), device_node!(id, virtio_npu_device));
         Ok(())
     }
 

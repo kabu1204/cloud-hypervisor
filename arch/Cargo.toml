@@ -15,7 +15,7 @@ tdx = []
 [dependencies]
 anyhow = { workspace = true }
 byteorder = { workspace = true }
-hypervisor = { path = "../hypervisor" }
+hypervisor = { path = "../hypervisor", features = ["kvm"] }
 libc = { workspace = true }
 linux-loader = { workspace = true, features = ["bzimage", "elf", "pe"] }
 log = { workspace = true }

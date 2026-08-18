@@ -244,8 +244,23 @@ fn create_vmm_ioctl_seccomp_rule_common_mshv() -> Result<Vec<SeccompRule>, Backe
 }
 
 #[cfg(feature = "kvm")]
+// virtio-npu backend (npu-vmm): device worker threads inherit the VMM
+// thread's seccomp filter (filters stack on clone), so the DRM/rocket
+// ioctls the backend re-issues on the host /dev/accel fd must be in the
+// VMM allowlist. Request numbers: _IOWR/_IOW('d', DRM_COMMAND_BASE+n, T).
+const DRM_ROCKET_CREATE_BO: u64 = 0xc018_6440; // _IOWR('d', 0x40, 24)
+const DRM_ROCKET_SUBMIT: u64 = 0x4018_6441; //    _IOW('d', 0x41, 24)
+const DRM_ROCKET_PREP_BO: u64 = 0x4010_6442; //   _IOW('d', 0x42, 16)
+const DRM_ROCKET_FINI_BO: u64 = 0x4008_6443; //   _IOW('d', 0x43, 8)
+const DRM_GEM_CLOSE_REQ: u64 = 0x4008_6409; //    _IOW('d', 0x09, 8)
+
 fn create_vmm_ioctl_seccomp_rule_common_kvm() -> Result<Vec<SeccompRule>, BackendError> {
     Ok(or![
+        and![Cond::new(1, ArgLen::Dword, Eq, DRM_ROCKET_CREATE_BO)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, DRM_ROCKET_SUBMIT)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, DRM_ROCKET_PREP_BO)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, DRM_ROCKET_FINI_BO)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, DRM_GEM_CLOSE_REQ)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_CHECK_EXTENSION)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_CREATE_DEVICE,)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_CREATE_IRQCHIP,)?],

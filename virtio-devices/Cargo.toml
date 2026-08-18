@@ -17,7 +17,7 @@ block = { path = "../block" }
 byteorder = { workspace = true }
 epoll = { workspace = true }
 event_monitor = { path = "../event_monitor" }
-hypervisor = { path = "../hypervisor" }
+hypervisor = { path = "../hypervisor", features = ["kvm"] }
 libc = { workspace = true }
 log = { workspace = true }
 mshv-ioctls = { workspace = true, optional = true }
