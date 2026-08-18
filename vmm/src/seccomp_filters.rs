@@ -253,6 +253,8 @@ const DRM_ROCKET_SUBMIT: u64 = 0x4018_6441; //    _IOW('d', 0x41, 24)
 const DRM_ROCKET_PREP_BO: u64 = 0x4010_6442; //   _IOW('d', 0x42, 16)
 const DRM_ROCKET_FINI_BO: u64 = 0x4008_6443; //   _IOW('d', 0x43, 8)
 const DRM_GEM_CLOSE_REQ: u64 = 0x4008_6409; //    _IOW('d', 0x09, 8)
+// vendor extension (host/rocket-host): _IOWR('d', 0x44, 32)
+const DRM_ROCKET_CREATE_BO_EXT: u64 = 0xc020_6444;
 
 fn create_vmm_ioctl_seccomp_rule_common_kvm() -> Result<Vec<SeccompRule>, BackendError> {
     Ok(or![
@@ -261,6 +263,7 @@ fn create_vmm_ioctl_seccomp_rule_common_kvm() -> Result<Vec<SeccompRule>, Backen
         and![Cond::new(1, ArgLen::Dword, Eq, DRM_ROCKET_PREP_BO)?],
         and![Cond::new(1, ArgLen::Dword, Eq, DRM_ROCKET_FINI_BO)?],
         and![Cond::new(1, ArgLen::Dword, Eq, DRM_GEM_CLOSE_REQ)?],
+        and![Cond::new(1, ArgLen::Dword, Eq, DRM_ROCKET_CREATE_BO_EXT)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_CHECK_EXTENSION)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_CREATE_DEVICE,)?],
         and![Cond::new(1, ArgLen::Dword, Eq, KVM_CREATE_IRQCHIP,)?],

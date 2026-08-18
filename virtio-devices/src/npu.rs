@@ -28,7 +28,7 @@ use seccompiler::SeccompAction;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use virtio_queue::{Queue, QueueT};
-use vm_memory::{Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic, guest_memory};
+use vm_memory::{Bytes, GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic, guest_memory};
 use vm_migration::{Migratable, MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
 use vmm_sys_util::ioctl::{ioctl_with_mut_ref, ioctl_with_ref};
 use vm_virtio::checked_descriptor::DescriptorChainExt;
@@ -138,6 +138,24 @@ vmm_sys_util::ioctl_iow_nr!(
 );
 vmm_sys_util::ioctl_iow_nr!(DRM_GEM_CLOSE, DRM_IOCTL_BASE, 0x09, DrmGemClose);
 
+// npu-vmm host driver extension (host/rocket-host): wrap foreign (guest
+// RAM) pages in a BO mapped into this file's IOMMU domain — zero-copy.
+#[repr(C)]
+#[derive(Default)]
+struct DrmRocketCreateBoExt {
+    pas: u64,
+    nr_pages: u32,
+    handle: u32,
+    dma_address: u64,
+    offset: u64,
+}
+vmm_sys_util::ioctl_iowr_nr!(
+    ROCKET_CREATE_BO_EXT,
+    DRM_IOCTL_BASE,
+    0x44,
+    DrmRocketCreateBoExt
+);
+
 #[derive(Error, Debug)]
 enum Error {
     #[error("Descriptor chain too short")]
@@ -154,13 +172,17 @@ enum Error {
 
 struct HostBo {
     handle: u32,
-    va: usize,
+    va: usize,       /* v1 fallback only */
     size: usize,
     gpas: Vec<u64>,
+    copy: bool,      /* true = bounce-copy data path (no host ext ioctl) */
 }
 
 impl Drop for HostBo {
     fn drop(&mut self) {
+        if self.va == 0 {
+            return;
+        }
         // SAFETY: va/size come from a successful mmap of this BO.
         unsafe { libc::munmap(self.va as *mut libc::c_void, self.size) };
     }
@@ -210,10 +232,67 @@ struct NpuEpollHandler {
     kill_evt: EventFd,
     pause_evt: EventFd,
     accel: File,
+    pagemap: File,
     bos: HashMap<u32, HostBo>, /* guest wire id -> host BO */
 }
 
 impl NpuEpollHandler {
+    /* Resolve one guest page's host physical address via pagemap. */
+    fn gpa_to_host_pa(&self, gpa: u64) -> Result<u64, i32> {
+        use std::os::unix::fs::FileExt;
+        let mem = self.mem.memory();
+        let va = mem
+            .get_host_address(GuestAddress(gpa))
+            .map_err(|_| libc::EFAULT)? as usize;
+        let off = (va >> 12) * 8;
+        let mut buf = [0u8; 8];
+        let mut entry = self
+            .pagemap
+            .read_at(&mut buf, off as u64)
+            .ok()
+            .map(|_| u64::from_le_bytes(buf));
+        if entry.map_or(true, |e| e & (1 << 63) == 0) {
+            // not present: fault it in, then re-read
+            let _ = unsafe { std::ptr::read_volatile(va as *const u8) };
+            let mut b2 = [0u8; 8];
+            entry = self
+                .pagemap
+                .read_at(&mut b2, off as u64)
+                .ok()
+                .map(|_| u64::from_le_bytes(b2));
+        }
+        let e = entry.ok_or(libc::EFAULT)?;
+        if e & (1 << 63) == 0 {
+            return Err(libc::EFAULT);
+        }
+        let pfn = e & ((1u64 << 55) - 1);
+        Ok((pfn << 12) | (va as u64 & 0xfff))
+    }
+
+    /* Zero-copy create: wrap guest pages into a host BO via the
+     * host rocket CREATE_BO_EXT extension (host/rocket-host).
+     * Err = fall back to the bounce-copy path. */
+    fn host_bo_import(&self, gpas: &[u64]) -> Result<(u32, u64), i32> {
+        let mut pas = Vec::with_capacity(gpas.len());
+        for gpa in gpas {
+            pas.push(self.gpa_to_host_pa(*gpa)?);
+        }
+        eprintln!("NPUDEBUG import: npages={} pa0={:#x} pa_last={:#x}",
+            pas.len(), pas[0], pas[pas.len()-1]);
+        let mut args = DrmRocketCreateBoExt {
+            pas: pas.as_ptr() as u64,
+            nr_pages: gpas.len() as u32,
+            ..Default::default()
+        };
+        // SAFETY: valid fd; `pas` outlives the ioctl.
+        if unsafe { ioctl_with_mut_ref(&self.accel, ROCKET_CREATE_BO_EXT(), &mut args) } < 0 {
+            return Err(io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO));
+        }
+        Ok((args.handle, args.dma_address))
+    }
+
     fn host_bo_map(&mut self, size: u32) -> Result<(DrmRocketCreateBo, usize), i32> {
         let mut args = DrmRocketCreateBo {
             size,
@@ -313,7 +392,31 @@ impl NpuEpollHandler {
                 let gpas: Vec<u64> = (0..nr_pages)
                     .map(|i| u64::from_le_bytes(body[16 + i * 8..24 + i * 8].try_into().unwrap()))
                     .collect();
-                match self.host_bo_map(size) {
+                let imported = match self.host_bo_import(&gpas) {
+                    Ok((handle, iova)) => Some((handle, iova)),
+                    Err(e) => {
+                        debug!("virtio-npu: import failed ({e}), bounce-copy fallback");
+                        None
+                    }
+                };
+                match imported {
+                    Some((handle, iova)) => {
+                        self.bos.insert(
+                            gid,
+                            HostBo {
+                                handle,
+                                va: 0,
+                                size: size as usize,
+                                gpas,
+                                copy: false,
+                            },
+                        );
+                        rsp.extend_from_slice(&0u32.to_le_bytes());
+                        rsp.extend_from_slice(&16u32.to_le_bytes());
+                        rsp.extend_from_slice(&iova.to_le_bytes());
+                        rsp
+                    }
+                    None => match self.host_bo_map(size) {
                     Ok((args, va)) => {
                         self.bos.insert(
                             gid,
@@ -322,6 +425,7 @@ impl NpuEpollHandler {
                                 va,
                                 size: size as usize,
                                 gpas,
+                                copy: true,
                             },
                         );
                         debug!(
@@ -333,7 +437,8 @@ impl NpuEpollHandler {
                         rsp.extend_from_slice(&args.dma_address.to_le_bytes());
                         rsp
                     }
-                    Err(e) => fail(e),
+                        Err(e) => fail(e),
+                    },
                 }
             }
             OP_DESTROY_BO => {
@@ -361,8 +466,10 @@ impl NpuEpollHandler {
                 let Some(bo) = self.bos.get(&gid) else {
                     return fail(libc::ENOENT);
                 };
-                if let Err(e) = self.guest_to_host(bo) {
-                    return fail(e);
+                if bo.copy {
+                    if let Err(e) = self.guest_to_host(bo) {
+                        return fail(e);
+                    }
                 }
                 let args = DrmRocketFiniBo {
                     handle: bo.handle,
@@ -394,8 +501,10 @@ impl NpuEpollHandler {
                 // Blocks until the host job completes (or timeout).
                 // SAFETY: valid fd/struct.
                 if unsafe { ioctl_with_ref(&self.accel, ROCKET_PREP_BO(), &args) } == 0 {
-                    if let Err(e) = self.host_to_guest(bo) {
-                        return fail(e);
+                    if bo.copy {
+                        if let Err(e) = self.host_to_guest(bo) {
+                            return fail(e);
+                        }
                     }
                     rsp.extend_from_slice(&0u32.to_le_bytes());
                     rsp.extend_from_slice(&8u32.to_le_bytes());
@@ -627,6 +736,8 @@ impl VirtioDevice for Npu {
             kill_evt,
             pause_evt,
             accel,
+            pagemap: File::open("/proc/self/pagemap")
+                .unwrap_or_else(|_| File::open("/dev/null").unwrap()),
             bos: HashMap::new(),
         };
 
