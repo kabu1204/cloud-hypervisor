@@ -13,7 +13,7 @@
 // (v2 zero-copy via udmabuf+PRIME import is planned; the wire protocol
 // already carries the guest GPA list.)
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::io::AsRawFd;
@@ -233,7 +233,10 @@ struct NpuEpollHandler {
     pause_evt: EventFd,
     accel: File,
     pagemap: File,
+    force_bounce: bool,
     bos: HashMap<u32, HostBo>, /* guest wire id -> host BO */
+    // Bounce BOs whose newest contents were produced by the NPU.
+    device_dirty_gids: HashSet<u32>,
 }
 
 impl NpuEpollHandler {
@@ -277,8 +280,6 @@ impl NpuEpollHandler {
         for gpa in gpas {
             pas.push(self.gpa_to_host_pa(*gpa)?);
         }
-        eprintln!("NPUDEBUG import: npages={} pa0={:#x} pa_last={:#x}",
-            pas.len(), pas[0], pas[pas.len()-1]);
         let mut args = DrmRocketCreateBoExt {
             pas: pas.as_ptr() as u64,
             nr_pages: gpas.len() as u32,
@@ -392,11 +393,15 @@ impl NpuEpollHandler {
                 let gpas: Vec<u64> = (0..nr_pages)
                     .map(|i| u64::from_le_bytes(body[16 + i * 8..24 + i * 8].try_into().unwrap()))
                     .collect();
-                let imported = match self.host_bo_import(&gpas) {
-                    Ok((handle, iova)) => Some((handle, iova)),
-                    Err(e) => {
-                        debug!("virtio-npu: import failed ({e}), bounce-copy fallback");
-                        None
+                let imported = if self.force_bounce {
+                    None // NPU_FORCE_BOUNCE=1: ablation toggle for v1 path
+                } else {
+                    match self.host_bo_import(&gpas) {
+                        Ok((handle, iova)) => Some((handle, iova)),
+                        Err(e) => {
+                            debug!("virtio-npu: import failed ({e}), bounce-copy fallback");
+                            None
+                        }
                     }
                 };
                 match imported {
@@ -417,26 +422,27 @@ impl NpuEpollHandler {
                         rsp
                     }
                     None => match self.host_bo_map(size) {
-                    Ok((args, va)) => {
-                        self.bos.insert(
-                            gid,
-                            HostBo {
-                                handle: args.handle,
-                                va,
-                                size: size as usize,
-                                gpas,
-                                copy: true,
-                            },
-                        );
-                        debug!(
-                            "virtio-npu: create_bo gid={gid} host_handle={} iova={:#x} size={size}",
-                            args.handle, args.dma_address
-                        );
-                        rsp.extend_from_slice(&0u32.to_le_bytes());
-                        rsp.extend_from_slice(&16u32.to_le_bytes());
-                        rsp.extend_from_slice(&args.dma_address.to_le_bytes());
-                        rsp
-                    }
+                        Ok((args, va)) => {
+                            self.bos.insert(
+                                gid,
+                                HostBo {
+                                    handle: args.handle,
+                                    va,
+                                    size: size as usize,
+                                    gpas,
+                                    copy: true,
+                                },
+                            );
+                            debug!(
+                                "virtio-npu: create_bo gid={gid} host_handle={} \
+                                 iova={:#x} size={size}",
+                                args.handle, args.dma_address
+                            );
+                            rsp.extend_from_slice(&0u32.to_le_bytes());
+                            rsp.extend_from_slice(&16u32.to_le_bytes());
+                            rsp.extend_from_slice(&args.dma_address.to_le_bytes());
+                            rsp
+                        }
                         Err(e) => fail(e),
                     },
                 }
@@ -446,6 +452,7 @@ impl NpuEpollHandler {
                     return fail(libc::EINVAL);
                 }
                 let gid = u32::from_le_bytes(body[0..4].try_into().unwrap());
+                self.device_dirty_gids.remove(&gid);
                 if let Some(bo) = self.bos.remove(&gid) {
                     let close = DrmGemClose {
                         handle: bo.handle,
@@ -477,6 +484,7 @@ impl NpuEpollHandler {
                 };
                 // SAFETY: valid fd/struct.
                 if unsafe { ioctl_with_ref(&self.accel, ROCKET_FINI_BO(), &args) } == 0 {
+                    self.device_dirty_gids.remove(&gid);
                     rsp.extend_from_slice(&0u32.to_le_bytes());
                     rsp.extend_from_slice(&8u32.to_le_bytes());
                     rsp
@@ -500,11 +508,17 @@ impl NpuEpollHandler {
                 };
                 // Blocks until the host job completes (or timeout).
                 // SAFETY: valid fd/struct.
-                if unsafe { ioctl_with_ref(&self.accel, ROCKET_PREP_BO(), &args) } == 0 {
-                    if bo.copy {
+                let rc = unsafe { ioctl_with_ref(&self.accel, ROCKET_PREP_BO(), &args) };
+                if rc == 0 {
+                    // Teflon can PREP a persistently mapped, CPU-written BO
+                    // again without FINI when WRITE is combined with other
+                    // map flags. Preserve guest-authoritative data in that
+                    // case; only copy back BOs written by a prior submit.
+                    if bo.copy && self.device_dirty_gids.contains(&gid) {
                         if let Err(e) = self.host_to_guest(bo) {
                             return fail(e);
                         }
+                        self.device_dirty_gids.remove(&gid);
                     }
                     rsp.extend_from_slice(&0u32.to_le_bytes());
                     rsp.extend_from_slice(&8u32.to_le_bytes());
@@ -523,6 +537,7 @@ impl NpuEpollHandler {
                 let mut jobs: Vec<DrmRocketJob> = Vec::with_capacity(job_count);
                 let mut keep: Vec<(Vec<DrmRocketTask>, Vec<u32>, Vec<u32>)> =
                     Vec::with_capacity(job_count);
+                let mut out_gids = Vec::new();
                 for _ in 0..job_count {
                     if body.len() < off + 16 {
                         return fail(libc::EINVAL);
@@ -544,7 +559,7 @@ impl NpuEpollHandler {
                             u32::from_le_bytes(body[off + 4..off + 8].try_into().unwrap());
                         off += 8;
                     }
-                    let mut translate = |count: usize, off: &mut usize| -> Result<Vec<u32>, i32> {
+                    let translate = |count: usize, off: &mut usize| -> Result<Vec<u32>, i32> {
                         let mut v = Vec::with_capacity(count);
                         for _ in 0..count {
                             let gid =
@@ -558,11 +573,74 @@ impl NpuEpollHandler {
                         Ok(v) => v,
                         Err(e) => return fail(e),
                     };
-                    let outs = match translate(out_count, &mut off) {
-                        Ok(v) => v,
-                        Err(e) => return fail(e),
-                    };
+                    let mut outs = Vec::with_capacity(out_count);
+                    for _ in 0..out_count {
+                        let gid = u32::from_le_bytes(body[off..off + 4].try_into().unwrap());
+                        off += 4;
+                        out_gids.push(gid);
+                        let Some(bo) = self.bos.get(&gid) else {
+                            return fail(libc::ENOENT);
+                        };
+                        outs.push(bo.handle);
+                    }
                     keep.push((tasks, ins, outs));
+                }
+                /* Some Mesa writes use PIPE_MAP_WRITE combined with other
+                 * flags, while rkt_buffer_unmap() only emits FINI for the
+                 * exact PIPE_MAP_WRITE value. Upload the guest snapshots at
+                 * submit so those CPU-written BOs still reach the host. Drain
+                 * prior work first: a host BO must not be overwritten while
+                 * an earlier job can still access it. */
+                let copy_handles: Vec<u32> = self
+                    .bos
+                    .values()
+                    .filter(|bo| bo.copy)
+                    .map(|bo| bo.handle)
+                    .collect();
+                if !copy_handles.is_empty() {
+                    // PREP drains prior device access before any host BO is
+                    // overwritten. Every PREP is paired with FINI below so
+                    // the BO is device-visible again before submission.
+                    for handle in copy_handles {
+                        let args = DrmRocketPrepBo {
+                            handle,
+                            reserved: 0,
+                            timeout_ns: i64::MAX,
+                        };
+                        // SAFETY: valid fd/struct.
+                        if unsafe { ioctl_with_ref(&self.accel, ROCKET_PREP_BO(), &args) } < 0 {
+                            return fail(
+                                io::Error::last_os_error()
+                                    .raw_os_error()
+                                    .unwrap_or(libc::EIO),
+                            );
+                        }
+                    }
+
+                    let gids: Vec<u32> = self.bos.keys().copied().collect();
+                    for gid in gids {
+                        let bo = self.bos.get(&gid).unwrap();
+                        if !bo.copy {
+                            continue;
+                        }
+                        if !self.device_dirty_gids.contains(&gid) {
+                            if let Err(e) = self.guest_to_host(bo) {
+                                return fail(e);
+                            }
+                        }
+                        let args = DrmRocketFiniBo {
+                            handle: bo.handle,
+                            reserved: 0,
+                        };
+                        // SAFETY: valid fd/struct.
+                        if unsafe { ioctl_with_ref(&self.accel, ROCKET_FINI_BO(), &args) } < 0 {
+                            return fail(
+                                io::Error::last_os_error()
+                                    .raw_os_error()
+                                    .unwrap_or(libc::EIO),
+                            );
+                        }
+                    }
                 }
                 for (tasks, ins, outs) in &keep {
                     jobs.push(DrmRocketJob {
@@ -583,6 +661,11 @@ impl NpuEpollHandler {
                 };
                 // SAFETY: all pointers reference live `keep` storage above.
                 if unsafe { ioctl_with_ref(&self.accel, ROCKET_SUBMIT(), &submit) } == 0 {
+                    for gid in out_gids {
+                        if self.bos.get(&gid).is_some_and(|bo| bo.copy) {
+                            self.device_dirty_gids.insert(gid);
+                        }
+                    }
                     rsp.extend_from_slice(&0u32.to_le_bytes());
                     rsp.extend_from_slice(&8u32.to_le_bytes());
                     rsp
@@ -738,7 +821,10 @@ impl VirtioDevice for Npu {
             accel,
             pagemap: File::open("/proc/self/pagemap")
                 .unwrap_or_else(|_| File::open("/dev/null").unwrap()),
+            force_bounce: std::env::var_os("NPU_FORCE_BOUNCE").is_some(),
+            // note: NPU_FORCE_BOUNCE set => every BO takes the bounce path
             bos: HashMap::new(),
+            device_dirty_gids: HashSet::new(),
         };
 
         let paused = self.common.paused.clone();
